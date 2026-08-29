@@ -120,12 +120,18 @@ jobs:
       - name: Build one-file binary (Linux, in old-glibc container)
         if: runner.os == 'Linux'
         run: |
-          docker run --rm \
+          docker run --rm -i \
             -v "$PWD/src:/work" -w /work \
-            python:3.11-slim-bullseye \
-            bash -c "apt-get update -qq && apt-get install -y -qq binutils >/dev/null 2>&1 && \
-              python -m pip install --upgrade pip -q && pip install -q -r requirements.txt pyinstaller && \
-              python -m PyInstaller --distpath dist --workpath build --clean --noconfirm inspy.spec"
+            python:3.11-slim-buster \
+            bash -s <<'EOF'
+          set -e
+          grep -rlE 'deb\.debian\.org|security\.debian\.org' /etc/apt/ 2>/dev/null | xargs -r sed -i 's|deb.debian.org|archive.debian.org|g; s|security.debian.org|archive.debian.org|g'
+          apt-get update -qq
+          apt-get install -y -qq binutils >/dev/null 2>&1
+          python -m pip install --upgrade pip -q
+          pip install -q -r requirements.txt pyinstaller
+          python -m PyInstaller --distpath dist --workpath build --clean --noconfirm inspy.spec
+          EOF
 
       - name: Assemble package (Windows)
         if: runner.os == 'Windows'
