@@ -14,25 +14,30 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       should_build: ${{ steps.check.outputs.should_build }}
-      version: ${{ steps.check.outputs.version }}
-      short: ${{ steps.check.outputs.short }}
+      version: ${{ steps.head.outputs.version }}
+      short: ${{ steps.head.outputs.short }}
     steps:
-      - name: Clone upstream (gitee)
-        run: git clone --depth 1 https://gitee.com/yiwowang/inspy.git upstream
+      - uses: actions/checkout@v4
 
-      - name: Resolve version & check for new commit
+      - name: Get upstream HEAD & version
+        id: head
+        run: |
+          sha=$(git ls-remote https://gitee.com/yiwowang/inspy.git refs/heads/master | awk '{print $1}')
+          short=${sha:0:7}
+          date=$(date -u +%Y%m%d)
+          version="$date-$short"
+          echo "upstream HEAD: $sha (short=$short)"
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Check for new commit
         id: check
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          cd upstream
-          head=$(git rev-parse HEAD)
-          short=$(git rev-parse --short=7 HEAD)
-          date=$(date -u +%Y%m%d)
-          version="$date-$short"
-          echo "upstream HEAD: $head (short=$short)"
-
+          short="${{ steps.head.outputs.short }}"
           last=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
           if [ -n "$last" ]; then
             last_sha="${last#*-}"
@@ -43,11 +48,20 @@ jobs:
               exit 0
             fi
           fi
-
-          echo "Will build new release: $version"
+          echo "New upstream commit, will build."
           echo "should_build=true" >> "$GITHUB_OUTPUT"
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "short=$short" >> "$GITHUB_OUTPUT"
+
+      - name: Update inspy submodule pointer to upstream HEAD
+        if: steps.check.outputs.should_build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git submodule update --remote inspy
+          git add inspy
+          git commit -m "chore: 更新 inspy 子模块指针到母仓库最新 commit" || echo "submodule already up to date"
+          git push origin HEAD:main || echo "push no-op"
 
   build:
     needs: detect
@@ -57,15 +71,9 @@ jobs:
       matrix:
         include:
           - os: windows-latest
-            bin: inspy.exe
             art: inspy-win64
-            start: start.bat
-            zip: Compress-Archive
           - os: ubuntu-latest
-            bin: inspy
             art: inspy-linux64
-            start: start.sh
-            zip: zip
     runs-on: ${{ matrix.os }}
     steps:
       - name: Clone upstream (gitee)
@@ -116,7 +124,7 @@ jobs:
           Copy-Item "src/dist/inspy.exe" "$pkg/inspy.exe" -Force
           Copy-Item -Path @("src/VERSION", "src/README.md") -Destination "$pkg/" -Force
           Copy-Item -Path "src/inspy.cfg*" -Destination "$pkg/" -Force
-          Copy-Item "src/${{ matrix.start }}" "$pkg/${{ matrix.start }}" -Force
+          Set-Content -Path "$pkg/start.bat" -Value "@echo off`ninspy.exe`npause" -Encoding Ascii
           Compress-Archive -Path "$pkg/*" -DestinationPath "dist/$art.zip"
 
       - name: Assemble package (Linux)
@@ -128,8 +136,8 @@ jobs:
           cp src/dist/inspy "$pkg/inspy"
           cp src/VERSION src/README.md "$pkg/"
           cp src/inspy.cfg* "$pkg/"
-          cp "src/${{ matrix.start }}" "$pkg/"
-          chmod +x "$pkg/inspy"
+          printf '#!/bin/sh\ncd "$(dirname "$0")"\nexec ./inspy\n' > "$pkg/start.sh"
+          chmod +x "$pkg/inspy" "$pkg/start.sh"
           (cd "$pkg" && zip -r "../$art.zip" .)
 
       - uses: actions/upload-artifact@v4
