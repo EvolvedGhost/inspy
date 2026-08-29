@@ -1,0 +1,163 @@
+name: auto-release
+
+on:
+  schedule:
+    # 每天 03:00 (UTC) 自动检测上游是否有新 commit
+    - cron: '0 3 * * *'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  detect:
+    runs-on: ubuntu-latest
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      version: ${{ steps.check.outputs.version }}
+      short: ${{ steps.check.outputs.short }}
+    steps:
+      - name: Clone upstream (gitee)
+        run: git clone --depth 1 https://gitee.com/yiwowang/inspy.git upstream
+
+      - name: Resolve version & check for new commit
+        id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          cd upstream
+          head=$(git rev-parse HEAD)
+          short=$(git rev-parse --short=7 HEAD)
+          date=$(date -u +%Y%m%d)
+          version="$date-$short"
+          echo "upstream HEAD: $head (short=$short)"
+
+          last=$(gh release list --limit 1 --json tagName --jq '.[0].tagName' 2>/dev/null || true)
+          if [ -n "$last" ]; then
+            last_sha="${last#*-}"
+            echo "latest release tag: $last -> last_sha=$last_sha"
+            if [ "$last_sha" = "$short" ]; then
+              echo "No new commits since $last, skipping build."
+              echo "should_build=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          fi
+
+          echo "Will build new release: $version"
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "short=$short" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: detect
+    if: needs.detect.outputs.should_build == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            bin: inspy.exe
+            art: inspy-win64
+            start: start.bat
+            zip: Compress-Archive
+          - os: ubuntu-latest
+            bin: inspy
+            art: inspy-linux64
+            start: start.sh
+            zip: zip
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Clone upstream (gitee)
+        run: git clone --depth 1 https://gitee.com/yiwowang/inspy.git src
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r src/requirements.txt pyinstaller
+
+      - name: Write PyInstaller spec
+        run: |
+          cat > src/inspy.spec <<'SPEC'
+          from PyInstaller.utils.hooks import collect_submodules
+          hidden = collect_submodules('uvicorn') + collect_submodules('httpcore') + collect_submodules('httpx')
+          a = Analysis(
+              ['main.py'], pathex=[], binaries=[],
+              datas=[('lib/tools/pinyin/Mandarin.dat', 'lib/tools/pinyin')],
+              hiddenimports=hidden, hookspath=[], hooksconfig={},
+              runtime_hooks=[], excludes=[], noarchive=False)
+          pyz = PYZ(a.pure)
+          exe = EXE(pyz, a.scripts, a.binaries, a.datas, [],
+              name='inspy', debug=False, bootloader_ignore_signals=False,
+              strip=False, upx=True, upx_exclude=[], runtime_tmpdir=None,
+              console=True, disable_windowed_traceback=False, argv_emulation=False,
+              target_arch=None, codesign_identity=None, entitlements_file=None)
+          SPEC
+          ls src/requirements.txt
+
+      - name: Build one-file binary
+        run: python -m PyInstaller --distpath dist --workpath build --clean --noconfirm inspy.spec
+        working-directory: src
+        shell: bash
+
+      - name: Assemble package (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $art = "${{ matrix.art }}"
+          $pkg = "dist/$art"
+          New-Item -ItemType Directory -Force -Path $pkg | Out-Null
+          Copy-Item "src/dist/inspy.exe" "$pkg/inspy.exe" -Force
+          Copy-Item "src/VERSION" "src/README.md" "$pkg/" -Force
+          Copy-Item "src/inspy.cfg*" "$pkg/" -Force
+          Copy-Item "src/${{ matrix.start }}" "$pkg/${{ matrix.start }}" -Force
+          Compress-Archive -Path "$pkg/*" -DestinationPath "dist/$art.zip"
+
+      - name: Assemble package (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          art="${{ matrix.art }}"
+          pkg="dist/$art"
+          mkdir -p "$pkg"
+          cp src/dist/inspy "$pkg/inspy"
+          cp src/VERSION src/README.md "$pkg/"
+          cp src/inspy.cfg* "$pkg/"
+          cp "src/${{ matrix.start }}" "$pkg/"
+          chmod +x "$pkg/inspy"
+          (cd "$pkg" && zip -r "../$art.zip" .)
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.art }}
+          path: dist/${{ matrix.art }}.zip
+
+  release:
+    needs:
+      - detect
+      - build
+    if: needs.detect.outputs.should_build == 'true'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: Create GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          VERSION: ${{ needs.detect.outputs.version }}
+        run: |
+          echo "Creating release $VERSION"
+          gh release create "$VERSION" \
+            --title "$VERSION" \
+            --notes "自动构建上游 gitee.com/yiwowang/inspy 的最新代码（commit ${{ needs.detect.outputs.short }}）。" \
+            artifacts/inspy-win64.zip \
+            artifacts/inspy-linux64.zip
