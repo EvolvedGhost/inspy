@@ -1,0 +1,4 @@
+[submodule "inspy"]
+	path = inspy
+	url = https://gitee.com/yiwowang/inspy.git
+	branch = master
