@@ -114,8 +114,8 @@ jobs:
           $pkg = "dist/$art"
           New-Item -ItemType Directory -Force -Path $pkg | Out-Null
           Copy-Item "src/dist/inspy.exe" "$pkg/inspy.exe" -Force
-          Copy-Item "src/VERSION" "src/README.md" "$pkg/" -Force
-          Copy-Item "src/inspy.cfg*" "$pkg/" -Force
+          Copy-Item -Path @("src/VERSION", "src/README.md") -Destination "$pkg/" -Force
+          Copy-Item -Path "src/inspy.cfg*" -Destination "$pkg/" -Force
           Copy-Item "src/${{ matrix.start }}" "$pkg/${{ matrix.start }}" -Force
           Compress-Archive -Path "$pkg/*" -DestinationPath "dist/$art.zip"
 
