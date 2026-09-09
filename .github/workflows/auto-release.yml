@@ -52,16 +52,22 @@ jobs:
           echo "should_build=true" >> "$GITHUB_OUTPUT"
 
       - name: Update inspy submodule pointer to upstream HEAD
-        if: steps.check.outputs.should_build == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
+          UPSTREAM_SHA: ${{ steps.head.outputs.sha }}
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git submodule update --remote inspy
-          git add inspy
-          git commit -m "chore: 更新 inspy 子模块指针到母仓库最新 commit" || echo "submodule already up to date"
-          git push origin HEAD:main || echo "push no-op"
+          current_sha=$(git ls-tree HEAD inspy | awk '{print $3}')
+          if [ "$current_sha" = "$UPSTREAM_SHA" ]; then
+            echo "inspy submodule already points to $UPSTREAM_SHA"
+            exit 0
+          fi
+
+          git update-index --add --info-only --cacheinfo 160000 "$UPSTREAM_SHA" inspy
+          git diff --cached --quiet -- inspy && exit 0
+          git commit -m "chore: 更新 inspy 子模块指针到母仓库最新 commit"
+          git push origin HEAD:main
 
   build:
     needs: detect
